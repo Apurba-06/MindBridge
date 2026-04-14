@@ -1,10 +1,6 @@
 # MindBridge
 Emotionally Intelligent Conversational AI
 
-#API KEY
-GEMINI_API_KEY=AIzaSyDEdlwwGEFz1BvERDMv2yEACyv33r_XP6w
-
-
 
 
 #app.py
