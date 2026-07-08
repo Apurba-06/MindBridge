@@ -1,0 +1,53 @@
+:root {
+  --bg-deep: #121b30;
+  --bg-panel: #1b2740;
+  --bg-panel-raised: #22304d;
+  --line: rgba(199, 205, 217, 0.14);
+  --teal: #5ec8b9;
+  --teal-soft: rgba(94, 200, 185, 0.16);
+  --coral: #e8735f;
+  --coral-soft: rgba(232, 115, 95, 0.16);
+  --ink: #eef0f4;
+  --mist: #a9b2c6;
+  --mist-dim: #7c869d;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: radial-gradient(1200px 800px at 15% -10%, #1a2745 0%, var(--bg-deep) 55%);
+  color: var(--ink);
+  font-family: var(--font-body), system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: var(--teal-soft);
+  color: var(--ink);
+}
+
+button {
+  font-family: inherit;
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--teal);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}
