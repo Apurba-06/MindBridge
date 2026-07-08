@@ -1,4 +1,4 @@
-import google.generativeai as genai
+from google import genai
 import os, json
 import re
 from dotenv import load_dotenv
@@ -12,8 +12,8 @@ if not API_KEY:
         "with GEMINI_API_KEY=your_key_here, or set it in your environment/Streamlit secrets."
     )
 
-genai.configure(api_key=API_KEY)
-model = genai.GenerativeModel("gemini-2.5-flash")
+client = genai.Client(api_key=API_KEY)
+MODEL_NAME = "gemini-2.5-flash"
 
 # Fallback emotion state used if the model call/parse fails, so the app never crashes.
 _DEFAULT_EMOTION = {
@@ -41,7 +41,7 @@ Analyze this message and return ONLY a JSON object, no extra text:
 Message: "{message}"
 """
     try:
-        r = model.generate_content(prompt)
+        r = client.models.generate_content(model=MODEL_NAME, contents=prompt)
         text = r.text.strip()
         # Strip ```json ... ``` or ``` ... ``` code fences without mangling real content.
         text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text).strip()
@@ -151,11 +151,11 @@ def is_response_too_generic(response):
 def get_response(message, emotion, history):
     prompt = build_prompt(message, emotion, history)
     try:
-        response = model.generate_content(prompt).text
+        response = client.models.generate_content(model=MODEL_NAME, contents=prompt).text
 
         if is_response_too_generic(response):
             retry_prompt = prompt + "\n\nIMPORTANT: Your previous response was too generic or didn't end with a question. Please try again: Be specific, reference what the user said, and end with a question. NO advice, NO platitudes. Just acknowledgment + question."
-            response = model.generate_content(retry_prompt).text
+            response = client.models.generate_content(model=MODEL_NAME, contents=retry_prompt).text
 
         return response.strip()
     except Exception:
