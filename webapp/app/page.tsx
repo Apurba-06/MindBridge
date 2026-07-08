@@ -309,12 +309,6 @@ export default function Home() {
               Send
             </button>
           </form>
-
-          <footer className="safety-footer">
-            Not a crisis line. If you need help now: call or text{" "}
-            <a href="tel:988">988</a> or text HOME to{" "}
-            <a href="sms:741741&body=HOME">741741</a>.
-          </footer>
         </main>
 
         <aside className="weather-col">
@@ -487,15 +481,6 @@ export default function Home() {
         .composer button:disabled {
           opacity: 0.5;
           cursor: not-allowed;
-        }
-        .safety-footer {
-          padding: 0.6rem 1.25rem 1rem;
-          font-size: 0.72rem;
-          color: var(--mist-dim);
-          text-align: center;
-        }
-        .safety-footer a {
-          color: var(--mist);
         }
         .weather-col {
           border: 1px solid var(--line);
