@@ -4,6 +4,19 @@ A Next.js port of MindBridge, built to deploy on Vercel (the original `App.py`
 Streamlit version can't run on Vercel — it needs a persistent WebSocket
 server, which Vercel's serverless functions don't support).
 
+## Features
+
+- Streaming responses (tokens appear as Gemini generates them)
+- Emotion detection per message, visualized as an "emotional weather" gauge
+- Independent keyword-based crisis detection as a safety net alongside the
+  LLM-based detector (see `lib/safety.ts`)
+- Basic in-memory rate limiting per IP (`lib/rateLimit.ts` — note its
+  documented limitations for production use)
+- Session persistence via `sessionStorage` (survives a refresh, clears when
+  the tab closes)
+- A small valence sparkline showing emotional trend across the conversation
+- Unit tests for the pure emotion-parsing and safety logic
+
 ## Local development
 
 ```bash
@@ -14,6 +27,13 @@ npm run dev
 ```
 
 Open http://localhost:3000.
+
+## Running tests
+
+```bash
+npm test
+```
+
 
 ## Deploying to Vercel
 

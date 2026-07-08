@@ -1,16 +1,11 @@
 "use client";
 
-import { useRef, useState, useEffect } from "react";
-
-type Emotion = {
-  valence: number;
-  arousal: number;
-  urgency: number;
-  masking: string;
-  subtext: string;
-};
+import { useRef, useState, useEffect, useCallback } from "react";
+import type { Emotion } from "@/lib/emotion";
 
 type Message = { role: "user" | "assistant"; content: string };
+
+const STORAGE_KEY = "mindbridge:session:v1";
 
 function EmotionGauge({ emotion }: { emotion: Emotion | null }) {
   const valence = emotion?.valence ?? 0;
@@ -29,7 +24,7 @@ function EmotionGauge({ emotion }: { emotion: Emotion | null }) {
   const tipY = cy - needleLen * Math.sin(rad);
 
   const arousalMag = Math.max(0, Math.min(1, Math.abs(arousal)));
-  const pulseDuration = 2.6 - arousalMag * 1.8; // more arousal -> faster pulse
+  const pulseDuration = 2.6 - arousalMag * 1.8;
 
   const isCrisis = urgency >= 4;
 
@@ -88,11 +83,44 @@ function UrgencyTicks({ urgency }: { urgency: number }) {
           key={i}
           className="tick"
           style={{
-            background:
-              i <= urgency ? (urgency >= 4 ? "var(--coral)" : "var(--teal)") : "var(--line)",
+            background: i <= urgency ? (urgency >= 4 ? "var(--coral)" : "var(--teal)") : "var(--line)",
           }}
         />
       ))}
+    </div>
+  );
+}
+
+/** Small sparkline showing how valence has shifted across the conversation. */
+function ValenceSparkline({ history }: { history: Emotion[] }) {
+  if (history.length < 2) return null;
+
+  const w = 260;
+  const h = 48;
+  const pad = 4;
+  const points = history.map((e, i) => {
+    const x = pad + (i / (history.length - 1)) * (w - pad * 2);
+    const v = Math.max(-1, Math.min(1, e.valence));
+    const y = h / 2 - (v * (h / 2 - pad));
+    return `${x},${y}`;
+  });
+
+  const last = history[history.length - 1];
+  const lastColor = last.valence >= 0 ? "var(--teal)" : "var(--coral)";
+
+  return (
+    <div className="sparkline-wrap">
+      <span className="sparkline-label">Valence over time</span>
+      <svg viewBox={`0 0 ${w} ${h}`} className="sparkline-svg" preserveAspectRatio="none">
+        <line x1={pad} y1={h / 2} x2={w - pad} y2={h / 2} stroke="var(--line)" strokeWidth="1" />
+        <polyline points={points.join(" ")} fill="none" stroke="var(--mist)" strokeWidth="1.5" opacity={0.6} />
+        <circle
+          cx={points[points.length - 1].split(",")[0]}
+          cy={points[points.length - 1].split(",")[1]}
+          r="3"
+          fill={lastColor}
+        />
+      </svg>
     </div>
   );
 }
@@ -102,19 +130,61 @@ export default function Home() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [emotion, setEmotion] = useState<Emotion | null>(null);
+  const [emotionHistory, setEmotionHistory] = useState<Emotion[]>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [hydrated, setHydrated] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Restore session on first load. sessionStorage (not localStorage) is
+  // deliberate: it survives a refresh but clears when the tab/browser
+  // closes, which is a reasonable default for sensitive conversations.
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed.messages)) setMessages(parsed.messages);
+        if (Array.isArray(parsed.emotionHistory)) setEmotionHistory(parsed.emotionHistory);
+        if (parsed.emotion) setEmotion(parsed.emotion);
+      }
+    } catch {
+      // Corrupt or inaccessible storage — just start fresh.
+    } finally {
+      setHydrated(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    try {
+      sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ messages, emotionHistory, emotion }));
+    } catch {
+      // Storage full or unavailable — non-fatal, just skip persistence.
+    }
+  }, [messages, emotionHistory, emotion, hydrated]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, loading]);
 
+  const clearSession = useCallback(() => {
+    setMessages([]);
+    setEmotion(null);
+    setEmotionHistory([]);
+    setErrorMsg(null);
+    try {
+      sessionStorage.removeItem(STORAGE_KEY);
+    } catch {
+      // ignore
+    }
+  }, []);
+
   async function sendMessage() {
     const text = input.trim();
     if (!text || loading) return;
 
-    const nextHistory: Message[] = [...messages, { role: "user", content: text }];
-    setMessages(nextHistory);
+    const historyForRequest = messages;
+    setMessages((prev) => [...prev, { role: "user", content: text }]);
     setInput("");
     setLoading(true);
     setErrorMsg(null);
@@ -123,18 +193,58 @@ export default function Home() {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text, history: messages }),
+        body: JSON.stringify({ message: text, history: historyForRequest }),
       });
-      const data = await res.json();
 
-      if (!res.ok) {
+      if (res.status === 429) {
+        const data = await res.json().catch(() => ({}));
+        setErrorMsg(data.error ?? "Too many messages — please slow down.");
+        setLoading(false);
+        return;
+      }
+
+      if (!res.ok || !res.body) {
+        const data = await res.json().catch(() => ({}));
         setErrorMsg(data.error ?? "Something went wrong.");
         setLoading(false);
         return;
       }
 
-      setEmotion(data.emotion);
-      setMessages([...nextHistory, { role: "assistant", content: data.response }]);
+      // Append a placeholder assistant message we'll stream tokens into.
+      setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        let newlineIndex: number;
+        while ((newlineIndex = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, newlineIndex).trim();
+          buffer = buffer.slice(newlineIndex + 1);
+          if (!line) continue;
+
+          const event = JSON.parse(line);
+
+          if (event.type === "emotion") {
+            setEmotion(event.emotion);
+            setEmotionHistory((prev) => [...prev, event.emotion]);
+          } else if (event.type === "chunk") {
+            setMessages((prev) => {
+              const next = [...prev];
+              const lastIdx = next.length - 1;
+              next[lastIdx] = { ...next[lastIdx], content: next[lastIdx].content + event.text };
+              return next;
+            });
+          } else if (event.type === "error") {
+            setErrorMsg(event.message);
+          }
+        }
+      }
     } catch {
       setErrorMsg("Couldn't reach MindBridge. Check your connection and try again.");
     } finally {
@@ -147,8 +257,15 @@ export default function Home() {
   return (
     <div className="shell">
       <header className="topbar">
-        <span className="wordmark">MindBridge</span>
-        <span className="tagline">emotionally intelligent conversation</span>
+        <div>
+          <span className="wordmark">MindBridge</span>
+          <span className="tagline">emotionally intelligent conversation</span>
+        </div>
+        {messages.length > 0 && (
+          <button className="reset-btn" onClick={clearSession} type="button">
+            Start over
+          </button>
+        )}
       </header>
 
       <div className="layout">
@@ -166,14 +283,11 @@ export default function Home() {
             )}
             {messages.map((m, i) => (
               <div key={i} className={`bubble-row ${m.role}`}>
-                <div className={`bubble ${m.role}`}>{m.content}</div>
+                <div className={`bubble ${m.role}`}>
+                  {m.content || (loading && i === messages.length - 1 ? "…" : "")}
+                </div>
               </div>
             ))}
-            {loading && (
-              <div className="bubble-row assistant">
-                <div className="bubble assistant thinking">MindBridge is listening…</div>
-              </div>
-            )}
           </div>
 
           {errorMsg && <div className="error-banner">{errorMsg}</div>}
@@ -195,6 +309,12 @@ export default function Home() {
               Send
             </button>
           </form>
+
+          <footer className="safety-footer">
+            Not a crisis line. If you need help now: call or text{" "}
+            <a href="tel:988">988</a> or text HOME to{" "}
+            <a href="sms:741741&body=HOME">741741</a>.
+          </footer>
         </main>
 
         <aside className="weather-col">
@@ -214,7 +334,8 @@ export default function Home() {
                 <span>Masking</span>
                 <span>{emotion.masking}</span>
               </div>
-              <p className="subtext">"{emotion.subtext}"</p>
+              <p className="subtext">&ldquo;{emotion.subtext}&rdquo;</p>
+              <ValenceSparkline history={emotionHistory} />
             </div>
           ) : (
             <p className="reading-empty">Start chatting to see a reading.</p>
@@ -230,7 +351,8 @@ export default function Home() {
         }
         .topbar {
           display: flex;
-          align-items: baseline;
+          align-items: center;
+          justify-content: space-between;
           gap: 0.75rem;
           padding: 1.5rem 2rem 1rem;
           border-bottom: 1px solid var(--line);
@@ -241,10 +363,23 @@ export default function Home() {
           font-weight: 500;
           font-size: 1.6rem;
           letter-spacing: 0.01em;
+          margin-right: 0.75rem;
         }
         .tagline {
           color: var(--mist-dim);
           font-size: 0.85rem;
+        }
+        .reset-btn {
+          background: transparent;
+          border: 1px solid var(--line);
+          color: var(--mist);
+          border-radius: 8px;
+          padding: 0.4rem 0.8rem;
+          font-size: 0.8rem;
+          cursor: pointer;
+        }
+        .reset-btn:hover {
+          border-color: var(--mist-dim);
         }
         .layout {
           flex: 1;
@@ -307,6 +442,7 @@ export default function Home() {
           border-radius: 14px;
           line-height: 1.45;
           font-size: 0.95rem;
+          white-space: pre-wrap;
         }
         .bubble.user {
           background: var(--teal-soft);
@@ -315,10 +451,6 @@ export default function Home() {
         .bubble.assistant {
           background: var(--bg-panel-raised);
           border: 1px solid var(--line);
-        }
-        .bubble.thinking {
-          color: var(--mist-dim);
-          font-style: italic;
         }
         .error-banner {
           margin: 0 1.5rem;
@@ -356,6 +488,15 @@ export default function Home() {
           opacity: 0.5;
           cursor: not-allowed;
         }
+        .safety-footer {
+          padding: 0.6rem 1.25rem 1rem;
+          font-size: 0.72rem;
+          color: var(--mist-dim);
+          text-align: center;
+        }
+        .safety-footer a {
+          color: var(--mist);
+        }
         .weather-col {
           border: 1px solid var(--line);
           border-radius: 18px;
@@ -382,8 +523,13 @@ export default function Home() {
           animation: pulse ease-in-out infinite;
         }
         @keyframes pulse {
-          0%, 100% { transform: scale(0.92); }
-          50% { transform: scale(1.05); }
+          0%,
+          100% {
+            transform: scale(0.92);
+          }
+          50% {
+            transform: scale(1.05);
+          }
         }
         .gauge-svg {
           width: 100%;
@@ -431,6 +577,21 @@ export default function Home() {
         .reading-empty {
           color: var(--mist-dim);
           font-size: 0.85rem;
+        }
+        .sparkline-wrap {
+          margin-top: 0.5rem;
+          border-top: 1px solid var(--line);
+          padding-top: 0.75rem;
+        }
+        .sparkline-label {
+          display: block;
+          font-size: 0.7rem;
+          color: var(--mist-dim);
+          margin-bottom: 0.35rem;
+        }
+        .sparkline-svg {
+          width: 100%;
+          height: 48px;
         }
       `}</style>
     </div>
