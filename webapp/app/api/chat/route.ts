@@ -11,6 +11,7 @@ import { hasCrisisSignal } from "@/lib/safety";
 import { checkRateLimit } from "@/lib/rateLimit";
 
 export const runtime = "nodejs";
+export const maxDuration = 60;
 
 function getClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -37,7 +38,9 @@ Message: "${message}"
   try {
     const r = await ai.models.generateContent({ model: MODEL_NAME, contents: prompt });
     return parseEmotionResponse(r.text ?? "");
-  } catch {
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    console.error(`[MindBridge] detectEmotion generateContent failed: ${detail}`);
     return parseEmotionResponse("");
   }
 }
@@ -131,7 +134,9 @@ export async function POST(req: NextRequest) {
         }
 
         send({ type: "done" });
-      } catch {
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        console.error(`[MindBridge] generateContentStream failed: ${detail}`);
         send({
           type: "error",
           message:
