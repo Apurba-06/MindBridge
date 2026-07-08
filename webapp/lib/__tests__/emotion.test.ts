@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { stripCodeFence, parseEmotionResponse, isResponseTooGeneric, DEFAULT_EMOTION } from "../emotion";
+import {
+  stripCodeFence,
+  parseEmotionResponse,
+  isResponseTooGeneric,
+  trySplitEmotionAndReply,
+  DEFAULT_EMOTION,
+} from "../emotion";
 
 describe("stripCodeFence", () => {
   it("strips a ```json fence", () => {
@@ -77,5 +83,35 @@ describe("isResponseTooGeneric", () => {
   it("accepts a concise, specific, question-ending response", () => {
     const good = "That shift from loving it to not caring at all. When did that change?";
     expect(isResponseTooGeneric(good)).toBe(false);
+  });
+});
+
+describe("trySplitEmotionAndReply", () => {
+  it("returns null while the end marker hasn't arrived yet", () => {
+    expect(trySplitEmotionAndReply('<<<EMOTION>>>{"valence":0')).toBeNull();
+    expect(trySplitEmotionAndReply("")).toBeNull();
+  });
+
+  it("splits a complete emotion block from the trailing reply", () => {
+    const buffer =
+      '<<<EMOTION>>>{"valence":-0.4,"arousal":0.1,"urgency":2,"masking":"implicit","subtext":"feeling low"}<<<END>>>\nThat sounds heavy. What changed recently?';
+    const result = trySplitEmotionAndReply(buffer);
+    expect(result).not.toBeNull();
+    expect(result!.emotion.valence).toBe(-0.4);
+    expect(result!.emotion.subtext).toBe("feeling low");
+    expect(result!.remainder).toBe("That sounds heavy. What changed recently?");
+  });
+
+  it("handles a remainder that starts immediately with no newline", () => {
+    const buffer = '<<<EMOTION>>>{"valence":0,"arousal":0,"urgency":1,"masking":"explicit","subtext":""}<<<END>>>Hi there!';
+    const result = trySplitEmotionAndReply(buffer);
+    expect(result!.remainder).toBe("Hi there!");
+  });
+
+  it("falls back to DEFAULT_EMOTION if the JSON between markers is malformed", () => {
+    const buffer = "<<<EMOTION>>>not valid json<<<END>>>Some reply text";
+    const result = trySplitEmotionAndReply(buffer);
+    expect(result!.emotion).toEqual(DEFAULT_EMOTION);
+    expect(result!.remainder).toBe("Some reply text");
   });
 });

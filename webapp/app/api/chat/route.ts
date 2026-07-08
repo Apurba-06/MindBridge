@@ -1,11 +1,10 @@
 import { GoogleGenAI } from "@google/genai";
 import { NextRequest } from "next/server";
 import {
-  Emotion,
   HistoryTurn,
   MODEL_NAME,
-  buildPrompt,
-  parseEmotionResponse,
+  buildCombinedPrompt,
+  trySplitEmotionAndReply,
 } from "@/lib/emotion";
 import { hasCrisisSignal } from "@/lib/safety";
 import { checkRateLimit } from "@/lib/rateLimit";
@@ -21,28 +20,6 @@ function getClient(): GoogleGenAI {
     );
   }
   return new GoogleGenAI({ apiKey });
-}
-
-async function detectEmotion(ai: GoogleGenAI, message: string): Promise<Emotion> {
-  const prompt = `
-Analyze this message and return ONLY a JSON object, no extra text:
-{
-  "valence": <-1 to 1, negative to positive>,
-  "arousal": <-1 to 1, numb to activated>,
-  "urgency": <1 to 5, 1=safe 5=crisis>,
-  "masking": <"explicit" or "implicit">,
-  "subtext": "<one sentence interpretation>"
-}
-Message: "${message}"
-`;
-  try {
-    const r = await ai.models.generateContent({ model: MODEL_NAME, contents: prompt });
-    return parseEmotionResponse(r.text ?? "");
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    console.error(`[MindBridge] detectEmotion generateContent failed: ${detail}`);
-    return parseEmotionResponse("");
-  }
 }
 
 function clientKeyFor(req: NextRequest): string {
@@ -90,33 +67,18 @@ export async function POST(req: NextRequest) {
     return new Response(JSON.stringify({ error: messageText }), { status: 500 });
   }
 
-  // Model-based emotion read, plus an independent keyword-based crisis
-  // check that doesn't depend on the LLM call at all. If either signal
-  // indicates crisis-level urgency, we treat it as one.
-  const emotion = await detectEmotion(ai, message);
+  // Fast, independent keyword-based crisis check (no LLM call, ~instant).
+  // If it fires, the prompt forces the model's own emotion read to crisis
+  // level and forces crisis resources into the reply, in the same pass.
   const keywordCrisis = hasCrisisSignal(message);
-  if (keywordCrisis && emotion.urgency < 4) {
-    emotion.urgency = 4;
-    if (!emotion.subtext) {
-      emotion.subtext = "This message contains language associated with a safety concern.";
-    }
-  }
-
-  if (emotion.urgency >= 4) {
-    // Deliberately not logging message content — just that a crisis-level
-    // signal occurred, and from which detector, for basic operational visibility.
-    console.warn(
-      `[MindBridge] crisis-level signal detected at ${new Date().toISOString()} (keyword=${keywordCrisis}, model_urgency=${emotion.urgency})`
-    );
-  }
-
-  const prompt = buildPrompt(message, emotion, history);
+  const prompt = buildCombinedPrompt(message, history, keywordCrisis);
 
   const stream = new ReadableStream({
     async start(controller) {
       const send = (obj: unknown) => controller.enqueue(encoder.encode(JSON.stringify(obj) + "\n"));
 
-      send({ type: "emotion", emotion });
+      let buffer = "";
+      let emotionSent = false;
 
       try {
         const genStream = await ai.models.generateContentStream({
@@ -124,19 +86,71 @@ export async function POST(req: NextRequest) {
           contents: prompt,
         });
 
-        // Note: streaming trades away the non-streaming version's
-        // "regenerate if too generic" quality check, since retrying after
-        // tokens have already reached the client isn't possible without
-        // discarding visible output. The prompt's own constraints are the
-        // only safety net for response quality in this path.
         for await (const chunk of genStream) {
-          if (chunk.text) send({ type: "chunk", text: chunk.text });
+          if (!chunk.text) continue;
+
+          if (!emotionSent) {
+            buffer += chunk.text;
+            const split = trySplitEmotionAndReply(buffer);
+            if (split) {
+              const emotion = split.emotion;
+              // Belt-and-suspenders: even if the model didn't follow the
+              // safety override instruction, force urgency up so the
+              // crisis banner still shows.
+              if (keywordCrisis && emotion.urgency < 4) {
+                emotion.urgency = 4;
+                if (!emotion.subtext) {
+                  emotion.subtext = "This message contains language associated with a safety concern.";
+                }
+              }
+              if (emotion.urgency >= 4) {
+                console.warn(
+                  `[MindBridge] crisis-level signal detected at ${new Date().toISOString()} (keyword=${keywordCrisis}, model_urgency=${emotion.urgency})`
+                );
+              }
+              send({ type: "emotion", emotion });
+              emotionSent = true;
+              if (split.remainder) send({ type: "chunk", text: split.remainder });
+            }
+            // else: keep buffering, don't send anything yet — the emotion
+            // line is short, so this adds negligible perceived latency.
+          } else {
+            send({ type: "chunk", text: chunk.text });
+          }
+        }
+
+        // Model never emitted a recognizable emotion block (format drift).
+        // Fail safe: treat the whole buffer as the reply and use defaults.
+        if (!emotionSent) {
+          const fallbackEmotion = {
+            valence: 0,
+            arousal: 0,
+            urgency: keywordCrisis ? 4 : 1,
+            masking: "explicit",
+            subtext: keywordCrisis
+              ? "This message contains language associated with a safety concern."
+              : "",
+          };
+          send({ type: "emotion", emotion: fallbackEmotion });
+          if (buffer) send({ type: "chunk", text: buffer });
         }
 
         send({ type: "done" });
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err);
         console.error(`[MindBridge] generateContentStream failed: ${detail}`);
+        if (!emotionSent) {
+          send({
+            type: "emotion",
+            emotion: {
+              valence: 0,
+              arousal: 0,
+              urgency: keywordCrisis ? 4 : 1,
+              masking: "explicit",
+              subtext: "Unable to analyze this message right now.",
+            },
+          });
+        }
         send({
           type: "error",
           message:

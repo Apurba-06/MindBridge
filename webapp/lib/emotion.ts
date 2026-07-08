@@ -68,56 +68,105 @@ export function isResponseTooGeneric(response: string): boolean {
   return false;
 }
 
-export function buildPrompt(message: string, emotion: Emotion, history: HistoryTurn[]): string {
+export const EMOTION_START_MARKER = "<<<EMOTION>>>";
+export const EMOTION_END_MARKER = "<<<END>>>";
+
+/**
+ * Single combined prompt that asks the model to emit its emotion read as
+ * one delimited JSON line, then continue directly into the conversational
+ * reply — all in one generation. This replaces two sequential API calls
+ * (detect emotion, then respond) with one, roughly halving latency and
+ * API usage per message.
+ *
+ * This relies on the model's own autoregressive context: by the time it
+ * starts writing the human-facing reply, it has already "seen" the
+ * emotion judgment it just emitted, so it can condition the reply on it
+ * (e.g. including crisis resources if it just assessed high urgency) in
+ * the same pass.
+ */
+export function buildCombinedPrompt(
+  message: string,
+  history: HistoryTurn[],
+  forceCrisis: boolean
+): string {
   const recent = history.slice(-6);
   const historyText = recent
     .map((h) => `${h.role === "user" ? "User" : "MindBridge"}: ${h.content}`)
     .join("\n");
 
-  const crisisRule =
-    emotion.urgency >= 4
-      ? `CRISIS PROTOCOL:
-You MUST include: "Please call or text 988 (Suicide & Crisis Lifeline) or text HOME to 741741."
-Then continue and end with a question.`
-      : "No crisis - proceed normally";
+  const crisisInstruction = forceCrisis
+    ? `SAFETY OVERRIDE: This message matched a high-risk safety pattern. Regardless of your own
+urgency assessment, set "urgency" to 5 and your reply MUST include: "Please call or text 988
+(Suicide & Crisis Lifeline) or text HOME to 741741." Then continue and end with a question.`
+    : `If you assess urgency >= 4, your reply MUST include: "Please call or text 988 (Suicide &
+Crisis Lifeline) or text HOME to 741741." Then continue and end with a question. Otherwise,
+proceed normally.`;
 
   return `
-You are MindBridge — an emotionally intelligent mental health companion.
+You are MindBridge — an emotionally intelligent mental health companion, like a perceptive
+friend who really listens rather than a clinician.
 
-CRITICAL RULES:
+STEP 1 — Output exactly one line, and nothing else on that line:
+${EMOTION_START_MARKER}{"valence": <-1 to 1>, "arousal": <-1 to 1>, "urgency": <1 to 5, 1=safe 5=crisis>, "masking": "<explicit or implicit>", "subtext": "<one sentence interpretation>"}${EMOTION_END_MARKER}
+
+STEP 2 — Then, on the following lines, respond as MindBridge to the user's message.
+
+CRITICAL RULES FOR YOUR REPLY:
 - NO platitudes like "I understand how you feel" or "That must be hard"
 - NO giving advice unless explicitly asked
 - DO NOT suggest journaling, breathing exercises, or techniques
 - ALWAYS end your response with a genuine, specific question
 - Be concise: 2-3 sentences max, then the question
+- Warm and human in tone, like a close friend, never clinical or scripted
 
-CRISIS RULE (if urgency >=4):
-${crisisRule}
+${crisisInstruction}
 
 RESPONSE STRUCTURE (FOLLOW THIS EXACTLY):
 1. Acknowledge what they said (be specific, reference their words)
 2. Ask ONE probing question that shows you understood
 
-EXAMPLES OF GOOD RESPONSES:
+EXAMPLES OF GOOD REPLIES:
 
 User: "I just can't be bothered anymore. I used to love going out, playing sports."
-Response: "That shift from enjoying things to not finding a reason to get up. When did things start feeling this way?"
+Reply: "That shift from enjoying things to not finding a reason to get up. When did things start feeling this way?"
 
 User: "My parents are having a rough time and my exams didn't go well."
-Response: "You were carrying pressure while watching things at home fall apart. Do you feel like doing well was somehow connected to fixing things at home?"
+Reply: "You were carrying pressure while watching things at home fall apart. Do you feel like doing well was somehow connected to fixing things at home?"
 
 User: "I skipped a few lectures. It's whatever."
-Response: "'It's whatever' is doing a lot of work there. What thought goes through your head right before you decide not to go?"
+Reply: "'It's whatever' is doing a lot of work there. What thought goes through your head right before you decide not to go?"
 
 [CONVERSATION HISTORY]
 ${historyText}
 
-[EMOTION STATE]
-Valence=${emotion.valence} | Arousal=${emotion.arousal} | Urgency=${emotion.urgency}/5
-
 [USER MESSAGE]
 ${message}
 
-Now respond as MindBridge (2-3 sentences + a question, NO advice):
+Now output the emotion line, then your reply (2-3 sentences + a question, NO advice):
 `;
+}
+
+export type SplitResult = { emotion: Emotion; remainder: string };
+
+/**
+ * Given the buffer accumulated so far from a combined-prompt stream, checks
+ * whether the emotion block is complete (i.e. the end marker has arrived).
+ * If so, parses the emotion JSON and returns it along with whatever reply
+ * text has already streamed in after the marker. Returns null if the
+ * marker hasn't arrived yet (caller should keep buffering).
+ */
+export function trySplitEmotionAndReply(buffer: string): SplitResult | null {
+  const endIdx = buffer.indexOf(EMOTION_END_MARKER);
+  if (endIdx === -1) return null;
+
+  const startIdx = buffer.indexOf(EMOTION_START_MARKER);
+  const jsonText =
+    startIdx !== -1
+      ? buffer.slice(startIdx + EMOTION_START_MARKER.length, endIdx)
+      : buffer.slice(0, endIdx);
+
+  const emotion = parseEmotionResponse(jsonText);
+  const remainder = buffer.slice(endIdx + EMOTION_END_MARKER.length).replace(/^\s*\n/, "");
+
+  return { emotion, remainder };
 }

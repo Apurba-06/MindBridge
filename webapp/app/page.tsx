@@ -3,7 +3,7 @@
 import { useRef, useState, useEffect, useCallback } from "react";
 import type { Emotion } from "@/lib/emotion";
 
-type Message = { role: "user" | "assistant"; content: string };
+type Message = { role: "user" | "assistant"; content: string; timestamp: number };
 
 const STORAGE_KEY = "mindbridge:session:v1";
 
@@ -18,15 +18,19 @@ function EmotionGauge({ emotion }: { emotion: Emotion | null }) {
 
   const clampedValence = Math.max(-1, Math.min(1, valence));
   const angleDeg = 180 - ((clampedValence + 1) / 2) * 180;
-  const rad = (angleDeg * Math.PI) / 180;
   const needleLen = r - 10;
-  const tipX = cx + needleLen * Math.cos(rad);
-  const tipY = cy - needleLen * Math.sin(rad);
+  // Base needle is drawn pointing straight up; rotating the group by
+  // (90 - angleDeg) degrees brings it to the correct valence angle. Doing
+  // it via a CSS-transitioned transform (rather than recomputing raw
+  // coordinates) lets the needle ease smoothly between readings instead
+  // of jumping.
+  const rotation = 90 - angleDeg;
 
   const arousalMag = Math.max(0, Math.min(1, Math.abs(arousal)));
   const pulseDuration = 2.6 - arousalMag * 1.8;
 
   const isCrisis = urgency >= 4;
+  const needleColor = isCrisis ? "var(--coral)" : "var(--ink)";
 
   return (
     <div className="gauge-wrap">
@@ -56,16 +60,16 @@ function EmotionGauge({ emotion }: { emotion: Emotion | null }) {
           strokeLinecap="round"
           opacity={0.85}
         />
-        <line
-          x1={cx}
-          y1={cy}
-          x2={tipX}
-          y2={tipY}
-          stroke={isCrisis ? "var(--coral)" : "var(--ink)"}
-          strokeWidth="3"
-          strokeLinecap="round"
-        />
-        <circle cx={cx} cy={cy} r="5" fill={isCrisis ? "var(--coral)" : "var(--ink)"} />
+        <g
+          className="gauge-needle"
+          style={{
+            transform: `rotate(${rotation}deg)`,
+            transformOrigin: `${cx}px ${cy}px`,
+          }}
+        >
+          <line x1={cx} y1={cy} x2={cx} y2={cy - needleLen} stroke={needleColor} strokeWidth="3" strokeLinecap="round" />
+        </g>
+        <circle cx={cx} cy={cy} r="5" fill={needleColor} />
       </svg>
       <div className="gauge-labels">
         <span>stormy</span>
@@ -131,6 +135,46 @@ function TypingDots() {
       <span />
       <span />
       <span />
+    </span>
+  );
+}
+
+/** A small living presence next to MindBridge's messages — not a static icon. */
+function Avatar() {
+  return (
+    <span className="avatar" aria-hidden="true">
+      <span className="avatar-core" />
+    </span>
+  );
+}
+
+/** Relative time that stays honest — shows the exact time on hover/focus. */
+function MessageTime({ timestamp }: { timestamp: number }) {
+  const [label, setLabel] = useState("");
+
+  useEffect(() => {
+    const update = () => {
+      const diffSec = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+      if (diffSec < 10) setLabel("just now");
+      else if (diffSec < 60) setLabel(`${diffSec}s ago`);
+      else if (diffSec < 3600) setLabel(`${Math.floor(diffSec / 60)}m ago`);
+      else setLabel(new Date(timestamp).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }));
+    };
+    update();
+    const id = setInterval(update, 15000);
+    return () => clearInterval(id);
+  }, [timestamp]);
+
+  const absolute = new Date(timestamp).toLocaleString([], {
+    hour: "numeric",
+    minute: "2-digit",
+    month: "short",
+    day: "numeric",
+  });
+
+  return (
+    <span className="msg-time" title={absolute}>
+      {label}
     </span>
   );
 }
@@ -231,7 +275,7 @@ export default function Home() {
 
     const historyForRequest = overrideText ? messages.slice(0, -1) : messages;
     if (!overrideText) {
-      setMessages((prev) => [...prev, { role: "user", content: text }]);
+      setMessages((prev) => [...prev, { role: "user", content: text, timestamp: Date.now() }]);
       setInput("");
     }
     setLoading(true);
@@ -262,7 +306,7 @@ export default function Home() {
       }
 
       // Append a placeholder assistant message we'll stream tokens into.
-      setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
+      setMessages((prev) => [...prev, { role: "assistant", content: "", timestamp: Date.now() }]);
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -326,9 +370,10 @@ export default function Home() {
   return (
     <div className="shell">
       <header className="topbar">
-        <div>
+        <div className="topbar-title">
           <span className="wordmark">MindBridge</span>
-          <span className="tagline">emotionally intelligent conversation</span>
+          <span className="presence" aria-hidden="true" />
+          <span className="tagline">here to listen, any time</span>
         </div>
         {messages.length > 0 && (
           <button className="reset-btn" onClick={clearSession} type="button">
@@ -358,9 +403,13 @@ export default function Home() {
               </div>
             )}
             {messages.map((m, i) => (
-              <div key={i} className={`bubble-row ${m.role}`}>
-                <div className={`bubble ${m.role}`}>
-                  {m.content ? m.content : loading && i === messages.length - 1 ? <TypingDots /> : ""}
+              <div key={i} className={`bubble-row ${m.role} bubble-enter`}>
+                {m.role === "assistant" && <Avatar />}
+                <div className="bubble-col">
+                  <div className={`bubble ${m.role}`}>
+                    {m.content ? m.content : loading && i === messages.length - 1 ? <TypingDots /> : ""}
+                  </div>
+                  {m.content && <MessageTime timestamp={m.timestamp ?? Date.now()} />}
                 </div>
               </div>
             ))}
@@ -451,13 +500,37 @@ export default function Home() {
           padding: 1.5rem 2rem 1rem;
           border-bottom: 1px solid var(--line);
         }
+        .topbar-title {
+          display: flex;
+          align-items: baseline;
+          gap: 0.6rem;
+        }
         .wordmark {
           font-family: var(--font-display), serif;
           font-style: italic;
           font-weight: 500;
           font-size: 1.6rem;
           letter-spacing: 0.01em;
-          margin-right: 0.75rem;
+        }
+        .presence {
+          width: 7px;
+          height: 7px;
+          border-radius: 50%;
+          background: var(--teal);
+          box-shadow: 0 0 0 0 rgba(94, 200, 185, 0.5);
+          animation: presence-pulse 2.4s ease-in-out infinite;
+          align-self: center;
+        }
+        @keyframes presence-pulse {
+          0% {
+            box-shadow: 0 0 0 0 rgba(94, 200, 185, 0.45);
+          }
+          70% {
+            box-shadow: 0 0 0 6px rgba(94, 200, 185, 0);
+          }
+          100% {
+            box-shadow: 0 0 0 0 rgba(94, 200, 185, 0);
+          }
         }
         .tagline {
           color: var(--mist-dim);
@@ -555,12 +628,58 @@ export default function Home() {
         }
         .bubble-row {
           display: flex;
+          align-items: flex-end;
+          gap: 0.5rem;
         }
         .bubble-row.user {
           justify-content: flex-end;
         }
-        .bubble {
+        .bubble-enter {
+          animation: bubble-in 0.35s ease-out both;
+        }
+        @keyframes bubble-in {
+          from {
+            opacity: 0;
+            transform: translateY(6px);
+          }
+          to {
+            opacity: 1;
+            transform: translateY(0);
+          }
+        }
+        .avatar {
+          flex-shrink: 0;
+          width: 22px;
+          height: 22px;
+          border-radius: 50%;
+          background: radial-gradient(circle at 35% 30%, var(--teal), var(--bg-panel-raised) 70%);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          margin-bottom: 2px;
+        }
+        .avatar-core {
+          width: 7px;
+          height: 7px;
+          border-radius: 50%;
+          background: var(--ink);
+          opacity: 0.85;
+        }
+        .bubble-col {
+          display: flex;
+          flex-direction: column;
+          gap: 0.2rem;
           max-width: 75%;
+        }
+        .bubble-row.user .bubble-col {
+          align-items: flex-end;
+        }
+        .msg-time {
+          font-size: 0.68rem;
+          color: var(--mist-dim);
+          padding: 0 0.2rem;
+        }
+        .bubble {
           padding: 0.7rem 1rem;
           border-radius: 14px;
           line-height: 1.45;
@@ -706,6 +825,9 @@ export default function Home() {
           width: 100%;
           max-width: 220px;
           position: relative;
+        }
+        .gauge-needle {
+          transition: transform 0.7s cubic-bezier(0.34, 1.56, 0.64, 1);
         }
         .gauge-labels {
           display: flex;
