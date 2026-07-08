@@ -1,11 +1,28 @@
 import google.generativeai as genai
 import os, json
-import re  # <----------- CHANGE 1: Added for text cleaning
+import re
 from dotenv import load_dotenv
 
 load_dotenv()
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+
+API_KEY = os.getenv("GEMINI_API_KEY")
+if not API_KEY:
+    raise RuntimeError(
+        "GEMINI_API_KEY is not set. Create a .env file (see .env.example) "
+        "with GEMINI_API_KEY=your_key_here, or set it in your environment/Streamlit secrets."
+    )
+
+genai.configure(api_key=API_KEY)
 model = genai.GenerativeModel("gemini-2.5-flash")
+
+# Fallback emotion state used if the model call/parse fails, so the app never crashes.
+_DEFAULT_EMOTION = {
+    "valence": 0.0,
+    "arousal": 0.0,
+    "urgency": 1,
+    "masking": "explicit",
+    "subtext": "Unable to analyze this message right now.",
+}
 
 # <----------- CHANGE 2: REMOVED CBT_CONTEXT (no more advice-giving)
 # OLD: CBT_CONTEXT with breathing exercises, journaling etc.
@@ -23,9 +40,24 @@ Analyze this message and return ONLY a JSON object, no extra text:
 }}
 Message: "{message}"
 """
-    r = model.generate_content(prompt)
-    text = r.text.strip().strip("`json").strip("```").strip()
-    return json.loads(text)
+    try:
+        r = model.generate_content(prompt)
+        text = r.text.strip()
+        # Strip ```json ... ``` or ``` ... ``` code fences without mangling real content.
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text).strip()
+        emotion = json.loads(text)
+
+        # Ensure all expected keys are present with sane types.
+        emotion["valence"] = float(emotion.get("valence", 0.0))
+        emotion["arousal"] = float(emotion.get("arousal", 0.0))
+        emotion["urgency"] = int(emotion.get("urgency", 1))
+        emotion["masking"] = emotion.get("masking", "explicit")
+        emotion["subtext"] = emotion.get("subtext", "")
+        return emotion
+    except Exception:
+        # If the model returns malformed JSON or the call fails, fail safe
+        # rather than crashing the app.
+        return dict(_DEFAULT_EMOTION)
 
 # <----------- CHANGE 3: COMPLETELY REWROTE build_prompt function
 def build_prompt(message, emotion, history):
@@ -116,25 +148,21 @@ def is_response_too_generic(response):
     
     return False  # Response is good
 
-# <----------- CHANGE 5: Updated get_response with quality checking
 def get_response(message, emotion, history):
     prompt = build_prompt(message, emotion, history)
-    response = model.generate_content(prompt).text
-    
-    # Check if response is too generic
-    if is_response_too_generic(response):
-        # Try again with stricter instruction
-        retry_prompt = prompt + """
-\n\nIMPORTANT: Your previous response was too generic or didn't end with a question.
-Please try again: Be specific, reference what the user said, and end with a question.
-NO advice, NO platitudes. Just acknowledgment + question."""
-        
-        response = model.generate_content(retry_prompt).text
-    
-    return response
+    try:
+        response = model.generate_content(prompt).text
+
+        if is_response_too_generic(response):
+            retry_prompt = prompt + "\n\nIMPORTANT: Your previous response was too generic or didn't end with a question. Please try again: Be specific, reference what the user said, and end with a question. NO advice, NO platitudes. Just acknowledgment + question."
+            response = model.generate_content(retry_prompt).text
+
+        return response.strip()
+    except Exception:
+        return "I'm having trouble responding right now, there may be a connection or API issue on my end. Could you try sending that again?"
 
 # Quick test if run directly
-if __name__ == "main":
+if __name__ == "__main__":
     print("Testing improved MindBridge...")
     test_msg = "I used to love playing sports, now I just lie in bed"
     emotion = detect_emotion(test_msg)
