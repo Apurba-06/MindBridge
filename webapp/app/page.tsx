@@ -125,6 +125,16 @@ function ValenceSparkline({ history }: { history: Emotion[] }) {
   );
 }
 
+function TypingDots() {
+  return (
+    <span className="typing-dots" aria-hidden="true">
+      <span />
+      <span />
+      <span />
+    </span>
+  );
+}
+
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -133,7 +143,10 @@ export default function Home() {
   const [emotionHistory, setEmotionHistory] = useState<Emotion[]>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [hydrated, setHydrated] = useState(false);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const lastFailedMessageRef = useRef<string | null>(null);
 
   // Restore session on first load. sessionStorage (not localStorage) is
   // deliberate: it survives a refresh but clears when the tab/browser
@@ -164,8 +177,41 @@ export default function Home() {
   }, [messages, emotionHistory, emotion, hydrated]);
 
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+    const el = scrollRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    if (nearBottom) {
+      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+      setShowJumpToLatest(false);
+    } else {
+      setShowJumpToLatest(true);
+    }
   }, [messages, loading]);
+
+  const handleMessagesScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    setShowJumpToLatest(!nearBottom);
+  }, []);
+
+  const jumpToLatest = useCallback(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+    setShowJumpToLatest(false);
+  }, []);
+
+  // Keep focus in the composer between turns so people can just keep typing.
+  useEffect(() => {
+    if (hydrated && !loading) inputRef.current?.focus();
+  }, [hydrated, loading]);
+
+  // Auto-grow the textarea up to a max height instead of scrolling internally.
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, 140) + "px";
+  }, [input]);
 
   const clearSession = useCallback(() => {
     setMessages([]);
@@ -179,15 +225,18 @@ export default function Home() {
     }
   }, []);
 
-  async function sendMessage() {
-    const text = input.trim();
+  async function sendMessage(overrideText?: string) {
+    const text = (overrideText ?? input).trim();
     if (!text || loading) return;
 
-    const historyForRequest = messages;
-    setMessages((prev) => [...prev, { role: "user", content: text }]);
-    setInput("");
+    const historyForRequest = overrideText ? messages.slice(0, -1) : messages;
+    if (!overrideText) {
+      setMessages((prev) => [...prev, { role: "user", content: text }]);
+      setInput("");
+    }
     setLoading(true);
     setErrorMsg(null);
+    lastFailedMessageRef.current = null;
 
     try {
       const res = await fetch("/api/chat", {
@@ -199,6 +248,7 @@ export default function Home() {
       if (res.status === 429) {
         const data = await res.json().catch(() => ({}));
         setErrorMsg(data.error ?? "Too many messages — please slow down.");
+        lastFailedMessageRef.current = text;
         setLoading(false);
         return;
       }
@@ -206,6 +256,7 @@ export default function Home() {
       if (!res.ok || !res.body) {
         const data = await res.json().catch(() => ({}));
         setErrorMsg(data.error ?? "Something went wrong.");
+        lastFailedMessageRef.current = text;
         setLoading(false);
         return;
       }
@@ -216,6 +267,7 @@ export default function Home() {
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+      let sawError = false;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -242,14 +294,31 @@ export default function Home() {
             });
           } else if (event.type === "error") {
             setErrorMsg(event.message);
+            lastFailedMessageRef.current = text;
+            sawError = true;
           }
         }
       }
+
+      // If the stream errored out with no tokens at all, drop the empty
+      // placeholder bubble rather than leaving a blank assistant message.
+      if (sawError) {
+        setMessages((prev) => {
+          const last = prev[prev.length - 1];
+          if (last && last.role === "assistant" && last.content === "") return prev.slice(0, -1);
+          return prev;
+        });
+      }
     } catch {
       setErrorMsg("Couldn't reach MindBridge. Check your connection and try again.");
+      lastFailedMessageRef.current = text;
     } finally {
       setLoading(false);
     }
+  }
+
+  function retryLastMessage() {
+    if (lastFailedMessageRef.current) sendMessage(lastFailedMessageRef.current);
   }
 
   const isCrisis = (emotion?.urgency ?? 1) >= 4;
@@ -277,20 +346,42 @@ export default function Home() {
             </div>
           )}
 
-          <div className="messages" ref={scrollRef}>
+          <div className="messages" ref={scrollRef} onScroll={handleMessagesScroll} aria-live="polite">
             {messages.length === 0 && !loading && (
-              <p className="empty-state">How are you feeling today?</p>
+              <div className="intro-card">
+                <p className="intro-title">How are you feeling today?</p>
+                <p className="intro-body">
+                  Say whatever&rsquo;s on your mind — MindBridge listens and asks questions rather than
+                  handing out advice. Your conversation stays in this browser tab and clears when you
+                  close it or hit &ldquo;Start over.&rdquo;
+                </p>
+              </div>
             )}
             {messages.map((m, i) => (
               <div key={i} className={`bubble-row ${m.role}`}>
                 <div className={`bubble ${m.role}`}>
-                  {m.content || (loading && i === messages.length - 1 ? "…" : "")}
+                  {m.content ? m.content : loading && i === messages.length - 1 ? <TypingDots /> : ""}
                 </div>
               </div>
             ))}
           </div>
 
-          {errorMsg && <div className="error-banner">{errorMsg}</div>}
+          {showJumpToLatest && (
+            <button className="jump-btn" type="button" onClick={jumpToLatest}>
+              ↓ Jump to latest
+            </button>
+          )}
+
+          {errorMsg && (
+            <div className="error-banner">
+              <span>{errorMsg}</span>
+              {lastFailedMessageRef.current && (
+                <button type="button" className="retry-btn" onClick={retryLastMessage}>
+                  Retry
+                </button>
+              )}
+            </div>
+          )}
 
           <form
             className="composer"
@@ -299,14 +390,23 @@ export default function Home() {
               sendMessage();
             }}
           >
-            <input
+            <textarea
+              ref={inputRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="Say what's on your mind…"
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  sendMessage();
+                }
+              }}
+              placeholder="Say what's on your mind… (Enter to send, Shift+Enter for a new line)"
               aria-label="Message"
+              rows={1}
+              disabled={loading}
             />
             <button type="submit" disabled={loading || !input.trim()}>
-              Send
+              {loading ? "…" : "Send"}
             </button>
           </form>
         </main>
@@ -391,6 +491,7 @@ export default function Home() {
           }
         }
         .chat-col {
+          position: relative;
           display: flex;
           flex-direction: column;
           min-height: 60vh;
@@ -417,12 +518,40 @@ export default function Home() {
           flex-direction: column;
           gap: 0.75rem;
         }
-        .empty-state {
-          color: var(--mist-dim);
+        .intro-card {
+          margin: auto;
+          max-width: 380px;
+          text-align: center;
+        }
+        .intro-title {
           font-family: var(--font-display), serif;
           font-style: italic;
-          font-size: 1.2rem;
-          margin: auto;
+          font-size: 1.3rem;
+          margin: 0 0 0.6rem;
+        }
+        .intro-body {
+          color: var(--mist-dim);
+          font-size: 0.85rem;
+          line-height: 1.55;
+          margin: 0;
+        }
+        .jump-btn {
+          position: absolute;
+          bottom: 5.5rem;
+          left: 50%;
+          transform: translateX(-50%);
+          background: var(--bg-panel-raised);
+          border: 1px solid var(--line);
+          color: var(--mist);
+          border-radius: 999px;
+          padding: 0.35rem 0.9rem;
+          font-size: 0.78rem;
+          cursor: pointer;
+          box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+        }
+        .jump-btn:hover {
+          border-color: var(--teal);
+          color: var(--ink);
         }
         .bubble-row {
           display: flex;
@@ -446,7 +575,42 @@ export default function Home() {
           background: var(--bg-panel-raised);
           border: 1px solid var(--line);
         }
+        .typing-dots {
+          display: inline-flex;
+          gap: 4px;
+          align-items: center;
+          padding: 0.15rem 0;
+        }
+        .typing-dots span {
+          width: 6px;
+          height: 6px;
+          border-radius: 50%;
+          background: var(--mist-dim);
+          animation: typing-bounce 1.1s ease-in-out infinite;
+        }
+        .typing-dots span:nth-child(2) {
+          animation-delay: 0.15s;
+        }
+        .typing-dots span:nth-child(3) {
+          animation-delay: 0.3s;
+        }
+        @keyframes typing-bounce {
+          0%,
+          60%,
+          100% {
+            transform: translateY(0);
+            opacity: 0.5;
+          }
+          30% {
+            transform: translateY(-4px);
+            opacity: 1;
+          }
+        }
         .error-banner {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 0.75rem;
           margin: 0 1.5rem;
           padding: 0.6rem 0.9rem;
           background: var(--coral-soft);
@@ -454,20 +618,41 @@ export default function Home() {
           border-radius: 10px;
           font-size: 0.85rem;
         }
+        .retry-btn {
+          flex-shrink: 0;
+          background: transparent;
+          border: 1px solid rgba(232, 115, 95, 0.5);
+          color: #ffd9d0;
+          border-radius: 8px;
+          padding: 0.3rem 0.7rem;
+          font-size: 0.78rem;
+          cursor: pointer;
+        }
+        .retry-btn:hover {
+          background: rgba(232, 115, 95, 0.15);
+        }
         .composer {
           display: flex;
+          align-items: flex-end;
           gap: 0.6rem;
           padding: 1rem 1.25rem;
           border-top: 1px solid var(--line);
         }
-        .composer input {
+        .composer textarea {
           flex: 1;
+          resize: none;
           background: var(--bg-deep);
           border: 1px solid var(--line);
           border-radius: 10px;
           color: var(--ink);
           padding: 0.65rem 0.9rem;
           font-size: 0.95rem;
+          font-family: inherit;
+          line-height: 1.4;
+          max-height: 140px;
+        }
+        .composer textarea:disabled {
+          opacity: 0.6;
         }
         .composer button {
           background: var(--teal);
@@ -475,6 +660,7 @@ export default function Home() {
           border: none;
           border-radius: 10px;
           padding: 0 1.2rem;
+          height: 42px;
           font-weight: 600;
           cursor: pointer;
         }
