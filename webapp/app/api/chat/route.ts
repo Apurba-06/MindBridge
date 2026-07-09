@@ -151,14 +151,18 @@ export async function POST(req: NextRequest) {
             },
           });
         }
+
+        const isQuotaError = /RESOURCE_EXHAUSTED|429|quota/i.test(detail);
+        const friendlyMessage = isQuotaError
+          ? "MindBridge has hit its daily message limit for today (the free Gemini API tier caps this at a small number of requests per day). It'll reset, or you can raise the limit by enabling billing on your Google AI Studio project — see https://ai.google.dev/gemini-api/docs/rate-limits."
+          : "I'm having trouble responding right now, there may be a connection or API issue on my end. Could you try sending that again?";
+
         send({
           type: "error",
-          message:
-            "I'm having trouble responding right now, there may be a connection or API issue on my end. Could you try sending that again?",
-          // Temporary diagnostic detail, visible in the browser's Network
-          // tab response, so the real cause can be identified without
-          // depending on Vercel's runtime log retrieval/retention.
-          debugDetail: detail,
+          message: friendlyMessage,
+          // Diagnostic detail, visible in the browser's Network tab
+          // response, for identifying causes beyond the common quota case.
+          debugDetail: isQuotaError ? undefined : detail,
         });
       } finally {
         controller.close();
