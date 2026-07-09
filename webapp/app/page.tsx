@@ -337,7 +337,7 @@ export default function Home() {
               return next;
             });
           } else if (event.type === "error") {
-            setErrorMsg(event.message);
+            setErrorMsg(event.debugDetail ? `${event.message} (${event.debugDetail})` : event.message);
             lastFailedMessageRef.current = text;
             sawError = true;
           }

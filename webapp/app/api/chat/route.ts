@@ -155,6 +155,10 @@ export async function POST(req: NextRequest) {
           type: "error",
           message:
             "I'm having trouble responding right now, there may be a connection or API issue on my end. Could you try sending that again?",
+          // Temporary diagnostic detail, visible in the browser's Network
+          // tab response, so the real cause can be identified without
+          // depending on Vercel's runtime log retrieval/retention.
+          debugDetail: detail,
         });
       } finally {
         controller.close();
